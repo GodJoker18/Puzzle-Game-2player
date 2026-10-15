@@ -200,8 +200,11 @@ class Game:
                   f"time_limit_s={cfg['time_limit']};solution={sol_str}")
 
     def next_level(self):
-        self.level_index += 1
-        self.start_level()
+        if self.level_index < len(LEVELS) - 1:
+            self.level_index += 1
+            self.start_level()
+        else:
+            self.state = STATE_VICTORY
 
     def restart(self):
         self.elapsed = 0.0
@@ -274,6 +277,8 @@ class Game:
                   f"dir={direction};pos={result.position};steps={result.steps}",
                   attempt)
         if result.outcome == "wall":
+            self._log("incorrect_attempt", f"failures={self.puzzle.failures}",
+                      "", attempt)
             self._show_feedback("Blocked! Try a different direction.", RED)
             if result.hint_triggered:
                 self._log("hint_shown", f"after_failures={self.puzzle.failures}")
@@ -595,9 +600,16 @@ def draw_operator_grid(screen, fonts, game):
         for c in range(cols):
             rx = gx + c * cell
             ry = gy + r * cell
-            cell_color = WALL_COLOR if (r, c) in puzzle.walls else CARD
-            pygame.draw.rect(screen, cell_color, (rx, ry, cell, cell))
-            pygame.draw.rect(screen, BG, (rx, ry, cell, cell), 1)
+            if (r, c) in puzzle.walls:
+                pygame.draw.rect(screen, (32, 34, 46), (rx, ry, cell, cell))
+                pygame.draw.rect(screen, (70, 72, 90), (rx, ry, cell, cell), 2)
+                pygame.draw.line(screen, (50, 52, 68), (rx + 6, ry + 6),
+                                 (rx + cell - 6, ry + cell - 6), 2)
+                pygame.draw.line(screen, (50, 52, 68), (rx + cell - 6, ry + 6),
+                                 (rx + 6, ry + cell - 6), 2)
+            else:
+                pygame.draw.rect(screen, CARD, (rx, ry, cell, cell))
+                pygame.draw.rect(screen, BG, (rx, ry, cell, cell), 1)
 
     # Draw start marker
     sr, sc = puzzle.start
@@ -723,8 +735,8 @@ def draw_operator_symbol(screen, fonts, game):
 
         if not is_completed:
             sym_col = SYMBOL_COLOR.get(sym, WHITE)
-            draw_symbol(screen, sym, (rx + cell_size // 2, ry + cell_size // 2),
-                        46, sym_col)
+            draw_symbol(screen, sym, (rx + cell_size // 2, ry + 32),
+                        40, sym_col)
 
         if is_completed:
             pygame.draw.rect(screen, (60, 160, 60), (rx, ry, cell_size, cell_size),
@@ -745,7 +757,7 @@ def draw_operator_symbol(screen, fonts, game):
                              2, border_radius=10)
         # Draw position number
         draw_text(screen, fonts["small"], str(idx + 1), GRAY,
-                  center=(rx + cell_size // 2, ry + cell_size - 10))
+                  center=(rx + cell_size // 2, ry + cell_size - 12))
 
     stat_y = gy + grid_h + 24
     picking = len(puzzle.selection)
