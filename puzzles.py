@@ -49,7 +49,7 @@ class SelectResult:
 
 
 # ===========================================================================
-# SequencePuzzle  (COLOR_ORDER)  — unchanged logic from original
+# SequencePuzzle  (COLOR_ORDER)  - unchanged logic from original
 # ===========================================================================
 class SequencePuzzle:
     def __init__(self, puzzle_type, options, solution,
@@ -137,7 +137,7 @@ class GridPuzzle:
     """
 
     def __init__(self, rows, cols, walls, start, goal, waypoints,
-                 hint_after=HINT_AFTER_FAILURES):
+                 hint_after=HINT_AFTER_FAILURES, path=None):
         self.puzzle_type = GRID_PATH
         self.rows = rows
         self.cols = cols
@@ -145,11 +145,13 @@ class GridPuzzle:
         self.start = start                   # (row, col)
         self.goal = goal                     # (row, col)
         self.waypoints = list(waypoints)     # list of direction strings (solution)
+        self.path = list(path) if path is not None else []
         self.hint_after = hint_after
         self.position = start
         self.steps = 0                       # valid moves taken
         self.failures = 0                    # wall-hit count
         self.solved = False
+        self._last_route_progress = 0
 
     @property
     def attempt(self):
@@ -158,6 +160,13 @@ class GridPuzzle:
     @property
     def hint_ready(self):
         return self.failures >= self.hint_after
+
+    @property
+    def route_progress(self):
+        """How many steps along the solution path have been completed."""
+        if self.path and self.position in self.path:
+            self._last_route_progress = self.path.index(self.position)
+        return self._last_route_progress
 
     def move(self, direction):
         """Attempt a move. Returns MoveResult."""
@@ -187,10 +196,10 @@ class GridPuzzle:
     def hint_text(self):
         if self.solved:
             return ""
-        idx = min(self.steps, len(self.waypoints) - 1)
+        idx = min(self.route_progress, len(self.waypoints) - 1)
         nxt = self.waypoints[idx] if self.waypoints else "forward"
         return (f"Move {nxt.upper()} next. "
-                "Player 2: read the next direction from your list.")
+                "Player 2: read the highlighted direction.")
 
 
 # ===========================================================================
@@ -243,9 +252,11 @@ class CoopSymbolPuzzle:
         return self.failures >= self.hint_after
 
     def move_highlight(self, direction):
-        """Cycle highlight left or right, skipping completed positions."""
+        """Cycle highlight left/up or right/down, skipping completed positions."""
         n = len(self.board)
-        step = 1 if direction == "right" else -1
+        if not n or len(self.completed_positions) >= n:
+            return
+        step = 1 if direction in ("right", "down") else -1
         new_hl = (self.highlight + step) % n
         # Skip already-completed positions if possible
         attempts = 0
@@ -280,7 +291,7 @@ class CoopSymbolPuzzle:
         selected = (sym_a, sym_b)
         pair_idx = self.current_pair_index
 
-        if set(selected) == set(expected):
+        if sorted(selected) == sorted(expected):
             self.completed_positions.extend([a_pos, b_pos])
             self.selection = []
             self.current_pair_index += 1
@@ -288,6 +299,12 @@ class CoopSymbolPuzzle:
                 self.solved = True
                 return PairResult("complete", selected, expected,
                                   pair_idx, self.failures)
+            # Advance highlight to the next available non-completed position
+            for offset in range(1, len(self.board) + 1):
+                candidate = (b_pos + offset) % len(self.board)
+                if candidate not in self.completed_positions:
+                    self.highlight = candidate
+                    break
             return PairResult("correct_pair", selected, expected,
                               pair_idx, self.failures)
 
@@ -365,11 +382,11 @@ def make_grid_puzzle(rows=5, cols=7, wall_count=6, rng=None):
         path = _bfs_path(rows, cols, walls, start, goal)
         if path and len(path) >= 4:
             return GridPuzzle(rows, cols, walls, start, goal,
-                              _path_to_waypoints(path))
+                              _path_to_waypoints(path), path=path)
     # Fallback: no walls
     walls = set()
     path = _bfs_path(rows, cols, walls, start, goal)
-    return GridPuzzle(rows, cols, walls, start, goal, _path_to_waypoints(path))
+    return GridPuzzle(rows, cols, walls, start, goal, _path_to_waypoints(path), path=path)
 
 
 def make_coop_symbol_puzzle(num_pairs=2, filler_count=2, rng=None):
