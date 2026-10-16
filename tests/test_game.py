@@ -312,6 +312,87 @@ class TestGameFlow(unittest.TestCase):
         for act in expected_actions:
             self.assertIn(act, logged_actions, f"Missing logged action: {act}")
 
+    def test_full_six_level_playthrough_with_comm_aware_dda(self):
+        from dda import MODE_COMMUNICATION_AWARE
+        logger = DummyLogger()
+        game = Game(logger, rng=None, dda_mode=MODE_COMMUNICATION_AWARE)
+        game.start_game()
+
+        dir_keys = {"up": pygame.K_UP, "down": pygame.K_DOWN, "left": pygame.K_LEFT, "right": pygame.K_RIGHT}
+
+        # Level 1: Color order with comm markers
+        game.handle_key(pygame.K_c)   # Player 2 clue
+        for color in game.puzzle.solution:
+            idx = game.puzzle.options.index(color)
+            game.handle_key(pygame.K_1 + idx)
+        self.assertEqual(game.state, STATE_LEVEL_COMPLETE)
+        self.assertIn(1, game._adapted_configs)  # Level 2 config adapted
+
+        # Level 2: Grid path with comm markers
+        game.handle_key(pygame.K_RETURN)
+        self.assertEqual(game.level_number, 2)
+        game.handle_key(pygame.K_c)
+        for d in game.puzzle.waypoints:
+            game.handle_key(dir_keys[d])
+        self.assertEqual(game.state, STATE_LEVEL_COMPLETE)
+
+        # Level 3: Coop symbol
+        game.handle_key(pygame.K_RETURN)
+        self.assertEqual(game.level_number, 3)
+        game.handle_key(pygame.K_c)
+        for pair in game.puzzle.pairs:
+            sym_a, sym_b = pair
+            pos_a = [i for i, s in enumerate(game.puzzle.board) if s == sym_a and i not in game.puzzle.completed_positions][0]
+            pos_b = [i for i, s in enumerate(game.puzzle.board) if s == sym_b and i not in game.puzzle.completed_positions and i != pos_a][0]
+            game.puzzle.highlight = pos_a
+            game.handle_key(pygame.K_RETURN)
+            game.puzzle.highlight = pos_b
+            game.handle_key(pygame.K_RETURN)
+        self.assertEqual(game.state, STATE_LEVEL_COMPLETE)
+
+        # Level 4: Color order
+        game.handle_key(pygame.K_RETURN)
+        self.assertEqual(game.level_number, 4)
+        for color in game.puzzle.solution:
+            idx = game.puzzle.options.index(color)
+            game.handle_key(pygame.K_1 + idx)
+        self.assertEqual(game.state, STATE_LEVEL_COMPLETE)
+
+        # Level 5: Grid path
+        game.handle_key(pygame.K_RETURN)
+        self.assertEqual(game.level_number, 5)
+        for d in game.puzzle.waypoints:
+            game.handle_key(dir_keys[d])
+        self.assertEqual(game.state, STATE_LEVEL_COMPLETE)
+
+        # Level 6: Coop symbol
+        game.handle_key(pygame.K_RETURN)
+        self.assertEqual(game.level_number, 6)
+        for pair in game.puzzle.pairs:
+            sym_a, sym_b = pair
+            pos_a = [i for i, s in enumerate(game.puzzle.board) if s == sym_a and i not in game.puzzle.completed_positions][0]
+            pos_b = [i for i, s in enumerate(game.puzzle.board) if s == sym_b and i not in game.puzzle.completed_positions and i != pos_a][0]
+            game.puzzle.highlight = pos_a
+            game.handle_key(pygame.K_RETURN)
+            game.puzzle.highlight = pos_b
+            game.handle_key(pygame.K_RETURN)
+
+        self.assertEqual(game.state, STATE_VICTORY)
+
+        # Restart via SPACE resets adapted configs
+        game.handle_key(pygame.K_SPACE)
+        self.assertEqual(game.state, STATE_PLAYING)
+        self.assertEqual(game.level_number, 1)
+        self.assertEqual(game._adapted_configs, {})
+
+        game.shutdown()
+
+        logged_actions = [e["action"] for e in logger.events]
+        self.assertIn("comm_clue", logged_actions)
+        self.assertIn("comm_latency", logged_actions)
+        self.assertIn("dda_decision", logged_actions)
+
 
 if __name__ == "__main__":
     unittest.main()
+

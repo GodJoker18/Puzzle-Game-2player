@@ -15,6 +15,11 @@ from puzzles import (
     make_color_puzzle, make_grid_puzzle, make_coop_symbol_puzzle,
     make_symbol_puzzle,
 )
+from dda import (
+    DDAController, PuzzleMetrics,
+    MODE_STATIC, MODE_PERFORMANCE_ONLY, MODE_COMMUNICATION_AWARE,
+    VALID_MODES,
+)
 
 WIDTH, HEIGHT = 1280, 720
 HALF = WIDTH // 2
@@ -60,6 +65,12 @@ MOVE_KEYS = {
 CYCLE_KEYS_LEFT  = (pygame.K_LEFT,  pygame.K_UP,   pygame.K_a, pygame.K_w)
 CYCLE_KEYS_RIGHT = (pygame.K_RIGHT, pygame.K_DOWN, pygame.K_d, pygame.K_s)
 CONFIRM_KEYS     = (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE)
+
+# Communication marker keys (Player 2 only - behavioral proxies)
+# C = clue just communicated  R = clue repeated / rephrased
+# These are MANUALLY marked proxies; they do NOT capture spoken words.
+COMM_CLUE_KEY   = pygame.K_c   # Player 2 presses C after saying a clue
+COMM_REPEAT_KEY = pygame.K_r   # Player 2 presses R when repeating a clue
 
 # ---- colors ---------------------------------------------------------------
 BG           = (22, 24, 32)
@@ -119,7 +130,7 @@ READER_HELP = {
 
 
 class Game:
-    def __init__(self, logger, rng=None):
+    def __init__(self, logger, rng=None, dda_mode=MODE_STATIC):
         self.logger = logger
         self.rng = rng or random.Random()
         self.state = STATE_START
@@ -134,7 +145,19 @@ class Game:
         self.flash_time = 0.0
         self.total_failures = 0
         self.total_time = 0.0
-        self._log("session_start")
+
+        # ---- DDA ----------------------------------------------------------
+        self.dda = DDAController(mode=dda_mode)
+        # Per-level adapted configs (populated by DDA; keyed by level index)
+        self._adapted_configs = {}
+        # Communication proxy tracking (cleared each level)
+        self._clue_count = 0
+        self._repeat_count = 0
+        self._latencies = []           # response latency per C marker (seconds)
+        self._last_clue_time = None    # elapsed time when last C was pressed
+
+        self._log("session_start",
+                  detail=f"dda_mode={self.dda.mode}")
 
     # ---- small helpers ------------------------------------------------------
     @property
@@ -143,7 +166,8 @@ class Game:
 
     @property
     def time_limit(self):
-        return LEVELS[self.level_index]["time_limit"]
+        cfg = self._adapted_configs.get(self.level_index, LEVELS[self.level_index])
+        return cfg["time_limit"]
 
     def _log(self, action, outcome="", detail="", attempt=None):
         puzzle = self.puzzle
@@ -164,10 +188,12 @@ class Game:
         self.level_index = 0
         self.total_failures = 0
         self.total_time = 0.0
+        self._adapted_configs.clear()
         self.start_level()
 
     def start_level(self):
-        cfg = LEVELS[self.level_index]
+        # Use DDA-adapted config if available, else fall back to baseline LEVELS
+        cfg = self._adapted_configs.get(self.level_index, LEVELS[self.level_index])
         ptype = cfg["type"]
         if ptype == COLOR_ORDER:
             fixed = FIXED_LEVEL_1_COLORS if cfg.get("fixed") else None
@@ -179,7 +205,6 @@ class Game:
             self.puzzle = make_coop_symbol_puzzle(
                 cfg["pairs"], cfg["fillers"], self.rng)
         else:
-            # Fallback: legacy symbol match (not in default LEVELS)
             self.puzzle = make_symbol_puzzle(cfg.get("length", 3), self.rng)
 
         self.elapsed = 0.0
@@ -187,6 +212,12 @@ class Game:
         self.feedback_time = 0.0
         self.flash_index = None
         self.state = STATE_PLAYING
+
+        # Reset communication proxy counters for this level
+        self._clue_count = 0
+        self._repeat_count = 0
+        self._latencies = []
+        self._last_clue_time = None
 
         # Build solution detail for logging
         pz = self.puzzle
@@ -197,7 +228,7 @@ class Game:
         else:
             sol_str = "|".join(f"{a}+{b}" for a, b in pz.pairs)
         self._log("level_start", "",
-                  f"time_limit_s={cfg['time_limit']};solution={sol_str}")
+                  f"dda_mode={self.dda.mode};time_limit_s={cfg['time_limit']};solution={sol_str}")
 
     def next_level(self):
         if self.level_index < len(LEVELS) - 1:
@@ -215,11 +246,43 @@ class Game:
         self._log("session_end", self.state)
         self.logger.close()
 
+    # ---- communication proxy helpers ----------------------------------------
+    def _handle_comm_clue(self):
+        """Player 2 presses C: record that a clue was communicated.
+        PROXY NOTE: This is a manually-marked behavioral proxy only.
+        It does not capture what was said."""
+        self._clue_count += 1
+        self._last_clue_time = self.elapsed
+        self._log("comm_clue", detail=f"clue_n={self._clue_count}")
+
+    def _handle_comm_repeat(self):
+        """Player 2 presses R: record that a clue was repeated or rephrased.
+        PROXY NOTE: This is a manually-marked behavioral proxy only."""
+        self._repeat_count += 1
+        self._log("comm_repeat", detail=f"repeat_n={self._repeat_count}")
+
+    def _record_latency_if_pending(self):
+        """Call after any Player 1 action to close a pending C-marker window."""
+        if self._last_clue_time is not None:
+            latency = self.elapsed - self._last_clue_time
+            self._latencies.append(round(latency, 3))
+            self._log("comm_latency",
+                      detail=f"latency_s={latency:.3f};clue_n={self._clue_count}")
+            self._last_clue_time = None
+
     # ---- input --------------------------------------------------------------
     def handle_key(self, key):
         """Route key presses to the active puzzle type. Unknown keys are ignored."""
         if self.state == STATE_PLAYING:
             ptype = self.puzzle.puzzle_type
+
+            # Communication proxy markers (Player 2 only, always available)
+            if key == COMM_CLUE_KEY:
+                self._handle_comm_clue()
+                return
+            if key == COMM_REPEAT_KEY:
+                self._handle_comm_repeat()
+                return
 
             if ptype == COLOR_ORDER:
                 index = SELECT_KEYS.get(key)
@@ -248,9 +311,14 @@ class Game:
                 self.restart()
         elif key == pygame.K_SPACE and self.state == STATE_VICTORY:
             self.restart()
+        elif key == pygame.K_TAB and self.state == STATE_START:
+            # Cycle DDA mode from start screen
+            new_mode = self.dda.cycle_mode()
+            self._log("dda_mode_change", detail=f"mode={new_mode}")
 
     # ---- puzzle-specific handlers -------------------------------------------
     def _handle_color_select(self, index):
+        self._record_latency_if_pending()
         result = self.puzzle.select(index)
         if result.outcome == "ignored":
             return
@@ -271,6 +339,7 @@ class Game:
             self._finish_puzzle(result.attempt)
 
     def _handle_grid_move(self, direction):
+        self._record_latency_if_pending()
         result = self.puzzle.move(direction)
         attempt = self.puzzle.attempt
         self._log("grid_move", result.outcome,
@@ -288,6 +357,7 @@ class Game:
             self._finish_puzzle(attempt)
 
     def _handle_symbol_confirm(self):
+        self._record_latency_if_pending()
         result = self.puzzle.confirm_selection()
         attempt = self.puzzle.attempt
         if result.outcome == "ignored":
@@ -315,7 +385,47 @@ class Game:
         self._log("puzzle_complete", "success",
                   f"mistakes={self.puzzle.failures};"
                   f"timed_out={self.timed_out}", attempt)
-        if self.level_index == len(LEVELS) - 1:
+
+        # ---- DDA evaluation (runs between every puzzle) --------------------
+        if self.level_index < len(LEVELS) - 1:
+            next_idx = self.level_index + 1
+            next_baseline = self._adapted_configs.get(next_idx, LEVELS[next_idx])
+            metrics = PuzzleMetrics(
+                puzzle_type=self.puzzle.puzzle_type,
+                elapsed=self.elapsed,
+                time_limit=self.time_limit,
+                failures=self.puzzle.failures,
+                hint_triggered=self.puzzle.hint_ready,
+                timed_out=self.timed_out,
+                clue_count=self._clue_count,
+                repeat_count=self._repeat_count,
+                latencies=list(self._latencies),
+            )
+            dda_result = self.dda.evaluate(
+                metrics, next_baseline["type"], next_baseline)
+            self._adapted_configs[next_idx] = dda_result.adapted_config
+            self._log(
+                "dda_decision",
+                outcome=dda_result.reason,
+                detail=(
+                    f"mode={dda_result.mode}"
+                    f";perf={dda_result.perf_score:.3f}"
+                    f";comm={dda_result.comm_score:.3f}"
+                    f";combined={dda_result.combined_score:.3f}"
+                    f";prev_tier={dda_result.prev_tier}"
+                    f";new_tier={dda_result.new_tier}"
+                    f";adjustment={dda_result.adjustment:+d}"
+                    f";elapsed_s={metrics.elapsed:.1f}"
+                    f";failures={metrics.failures}"
+                    f";hint={int(metrics.hint_triggered)}"
+                    f";timed_out={int(metrics.timed_out)}"
+                    f";clues={metrics.clue_count}"
+                    f";repeats={metrics.repeat_count}"
+                ),
+            )
+
+        is_last = (self.level_index == len(LEVELS) - 1)
+        if is_last:
             self.state = STATE_VICTORY
             self._log("game_complete", "victory",
                       f"total_mistakes={self.total_failures};"
@@ -339,7 +449,7 @@ class Game:
 
     def draw(self, screen, fonts):
         if self.state == STATE_START:
-            draw_start_screen(screen, fonts)
+            draw_start_screen(screen, fonts, self)
             return
         draw_play_screen(screen, fonts, self)
         if self.state in (STATE_LEVEL_COMPLETE, STATE_VICTORY):
@@ -431,12 +541,12 @@ def draw_symbol(screen, name, center, size, color):
         pygame.draw.polygon(screen, color, cross_points(cx, cy, size))
 
 
-def draw_start_screen(screen, fonts):
+def draw_start_screen(screen, fonts, game=None):
     screen.fill(BG)
     draw_text(screen, fonts["title"], "Co-op Puzzle Game", WHITE,
-              center=(WIDTH // 2, 100))
+              center=(WIDTH // 2, 95))
     draw_text(screen, fonts["medium"], "Two players. One screen. Talk to each other!",
-              GRAY, center=(WIDTH // 2, 165))
+              GRAY, center=(WIDTH // 2, 155))
     lines = [
         "Player 1 (LEFT) is the Puzzle Operator: navigate, select, or match things.",
         "Player 2 (RIGHT) is the Clue Reader: you can see the answer. Player 1 cannot.",
@@ -449,17 +559,35 @@ def draw_start_screen(screen, fonts):
         f"A hint appears for Player 2 after {HINT_AFTER_FAILURES} mistakes.",
         "The timer is soft: overtime is logged but you keep playing.",
         f"Solve all {len(LEVELS)} puzzles to win.  ENTER = next level,  SPACE = play again.",
+        "",
+        "Communication markers (Player 2 - optional research proxies):",
+        "  C = mark that you just communicated a clue.   R = mark that you repeated a clue.",
+        "  These are manually marked behavioral proxies; they do NOT capture spoken words.",
     ]
-    y = 230
+    y = 215
     for line in lines:
         if line == "":
-            y += 12
+            y += 8
         else:
             y = draw_wrapped(screen, fonts["small"], line, WHITE, 220, y, 840,
-                             centered=False) + 10
+                             centered=False) + 6
+
     draw_text(screen, fonts["large"], "Press ENTER to start", GREEN,
-              center=(WIDTH // 2, 620))
-    draw_text(screen, fonts["small"], "ESC quits", GRAY, center=(WIDTH // 2, 665))
+              center=(WIDTH // 2, 595))
+    draw_text(screen, fonts["small"], "ESC quits", GRAY, center=(WIDTH // 2, 640))
+
+    # ---- DDA mode badge ----
+    dda_mode = game.dda.mode if game else MODE_STATIC
+    mode_labels = {
+        MODE_STATIC: ("DDA: Static (baseline)", GRAY),
+        MODE_PERFORMANCE_ONLY: ("DDA: Performance-only", ORANGE),
+        MODE_COMMUNICATION_AWARE: ("DDA: Communication-aware", (100, 200, 255)),
+    }
+    label, col = mode_labels.get(dda_mode, (f"DDA: {dda_mode}", GRAY))
+    pygame.draw.rect(screen, (34, 38, 54), (WIDTH // 2 - 200, 658, 400, 36), border_radius=8)
+    draw_text(screen, fonts["small"], label, col, center=(WIDTH // 2, 676))
+    draw_text(screen, fonts["small"], "TAB = cycle DDA mode",
+              GRAY, center=(WIDTH // 2, 706))
 
 
 def draw_play_screen(screen, fonts, game):
@@ -505,6 +633,14 @@ def draw_header(screen, fonts, game):
         color = ORANGE
         text = f"Overtime +{fmt_time(-remaining)}  (keep going!)"
     draw_text(screen, fonts["medium"], text, color, center=(WIDTH - 260, 35))
+    # DDA mode badge in header
+    mode_short = {MODE_STATIC: "Static", MODE_PERFORMANCE_ONLY: "Perf",
+                  MODE_COMMUNICATION_AWARE: "Comm"}
+    badge = f"DDA:{mode_short.get(game.dda.mode, game.dda.mode)}"
+    badge_col = {MODE_STATIC: GRAY, MODE_PERFORMANCE_ONLY: ORANGE,
+                 MODE_COMMUNICATION_AWARE: (100, 200, 255)}.get(game.dda.mode, GRAY)
+    draw_text(screen, fonts["small"], badge, badge_col,
+              topleft=(WIDTH // 2 + 4, 4))
 
 
 # ---- COLOR ORDER panels ----------------------------------------------------
